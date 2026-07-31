@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cuadro de Mandos ENUE - Dashboard Económico y Control de Incidencias</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.1.7"></script>
+    <style type="text/tailwindcss">
+        @theme {
+            --color-enue-dark: #09090b;
+            --color-enue-card: #18181b;
+        }
+        body { background-color: var(--color-enue-dark); color: white; margin: 0; font-family: system-ui, -apple-system, sans-serif; }
+    </style>
+    <script src="https://unpkg.com/@babel/standalone@7.26.10/babel.min.js"></script>
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.3.1",
+            "react/": "https://esm.sh/react@18.3.1/",
+            "react-dom": "https://esm.sh/react-dom@18.3.1",
+            "react-dom/": "https://esm.sh/react-dom@18.3.1/",
+            "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.474.0?external=react",
+            "recharts": "https://esm.sh/recharts@2.15.3?external=react,react-dom",
+            "papaparse": "https://esm.sh/papaparse@5.4.1"
+        }
+    }
+    </script>
+</head>
+<body class="bg-enue-dark text-gray-100 min-h-screen selection:bg-blue-500/30">
+    <div id="root"></div>
+    <script type="text/babel" data-type="module" data-presets="react">
+        import React, { useState, useEffect, useMemo } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+            Search, ChevronLeft, AlertCircle, Clock, Users, Building, 
+            FileText, Medal, Link as LinkIcon, RefreshCcw, Banknote,
+            AlertTriangle, UserCheck, UserX, CalendarX, CheckCircle2, 
+            Settings, ShieldAlert, Filter, Plus, Trash2, Edit3, X, Check
+        } from 'lucide-react';
+        import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell, LabelList } from 'recharts';
+        import Papa from 'papaparse';
+
+        // ============================================================================
+        // CONFIGURACIÓN CENTRAL
+        // ============================================================================
+        const GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vReNGg-A4tyoJhBCHWc703e6PiWYaZBAvvVahYrz3DavOLO67lplhVCZ4_wK18w_Yad_r1g95vszO1V/pub?gid=0&single=true&output=csv"; 
+        
+        // TARIFA ECONÓMICA (EN EUROS)
+        const TARIFA_HORA = 21;
+
+        // PLANTILLA DE 24 TRABAJADORES (Por defecto - Se puede editar en la interfaz)
+        const DEFAULT_PLANTILLA_24 = [
+            "Trabajador 1", "Trabajador 2", "Trabajador 3", "Trabajador 4",
+            "Trabajador 5", "Trabajador 6", "Trabajador 7", "Trabajador 8",
+            "Trabajador 9", "Trabajador 10", "Trabajador 11", "Trabajador 12",
+            "Trabajador 13", "Trabajador 14", "Trabajador 15", "Trabajador 16",
+            "Trabajador 17", "Trabajador 18", "Trabajador 19", "Trabajador 20",
+            "Trabajador 21", "Trabajador 22", "Trabajador 23", "Trabajador 24"
+        ];
+
+        // Formateador de moneda para euros
+        const formatEur = (value) => new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' }).format(value);
+
+        // Normalizador de cadenas para comparar nombres evitando errores de tildes o mayúsculas
+        const normalizeStr = (str) => str ? str.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : "";
+
+        function processData(csvData) {
+            const result = Papa.parse(csvData, { 
+                header: true, 
+                skipEmptyLines: true,
+                transformHeader: function(h) {
+                    return h.trim().toLowerCase();
+                }
+            });
+            
+            const rows = result.data.filter(r => r["fecha"] && r["nombre empleado"]).map(r => ({
+                ...r,
+                Proyecto: (!r["desc. proyecto"] || r["desc. proyecto"].trim() === '') ? "Obra no especificada" : r["desc. proyecto"].trim(),
+                Horas: parseFloat((r["horas"]||"0").replace(',', '.')) || 0,
+                Fecha: r["fecha"].trim(),
+                Empleado: r["nombre empleado"].trim(),
+                Tarea: r["desc. partida"] || "",
+                Obs: r["observ."] || r["observ"] || ""
+            }));
+            
+            return rows;
+        }
+
+        function App() {
+            const [data, setData] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState(null);
+            
+            const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard' | 'incidencias'
+            const [searchTerm, setSearchTerm] = useState("");
+            const [selectedProject, setSelectedProject] = useState(null);
+            const [workerFilter, setWorkerFilter] = useState("");
+            const [dateFilter, setDateFilter] = useState("");
+            const [incidenciaFilterType, setIncidenciaFilterType] = useState("all");
+
+            // Estado de la plantilla oficial (24 trabajadores)
+            const [plantilla, setPlantilla] = useState(() => {
+                const saved = localStorage.getItem('enue_plantilla_trabajadores');
+                if (saved) {
+                    try { return JSON.parse(saved); } catch (e) {}
+                }
+                return DEFAULT_PLANTILLA_24;
+            });
+
+            // Modal de edición de plantilla
+            const [showPlantillaModal, setShowPlantillaModal] = useState(false);
+            const [plantillaInput, setPlantillaInput] = useState("");
+
+            const fetchData = async () => {
+                if (!GOOGLE_SHEETS_CSV_URL) return;
+                
+                setLoading(true);
+                setError(null);
+                try {
+                    const urlAsegurada = GOOGLE_SHEETS_CSV_URL + (GOOGLE_SHEETS_CSV_URL.includes("?") ? "&" : "?") + "t=" + new Date().getTime();
+                    const response = await fetch(urlAsegurada, { redirect: "follow" });
+                    
+                    if (!response.ok) throw new Error("Error de red al intentar acceder al Google Sheets.");
+                    
+                    const csvText = await response.text();
+                    const parsed = processData(csvText);
+                    setData(parsed);
+                } catch (err) {
+                    setError("No se pudo cargar la información. Revisa el enlace público de tu Google Sheet. (" + err.message + ")");
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            useEffect(() => {
+                fetchData();
+            }, []);
+
+            // Guardar plantilla en localStorage al modificar
+            const handleSavePlantilla = (nombresList) => {
+                setPlantilla(nombresList);
+                localStorage.setItem('enue_plantilla_trabajadores', JSON.stringify(nombresList));
+                setShowPlantillaModal(false);
+            };
+
+            const openModalPlantilla = () => {
+                setPlantillaInput(plantilla.join("\n"));
+                setShowPlantillaModal(true);
+            };
+
+            // Días únicos con actividad en la empresa
+            const uniqueDates = useMemo(() => {
+                return [...new Set(data.map(d => d.Fecha))].sort();
+            }, [data]);
+
+            // CÓTEJO Y ANÁLISIS DE INCIDENCIAS DE TRABAJADORES
+            const auditAnalysis = useMemo(() => {
+                if (!data.length) return { incidencias: [], unlistedWorkers: [], workerStats: {}, totalIncidencias: 0 };
+
+                const incidencias = [];
+                const unlistedWorkersMap = new Map();
+                const dateWorkerEntries = {};
+                const dailyHoursMap = {};
+
+                data.forEach(item => {
+                    const normEmp = normalizeStr(item.Empleado);
+                    const key = `${item.Fecha}|${normEmp}`;
+                    
+                    if (!dateWorkerEntries[key]) dateWorkerEntries[key] = [];
+                    dateWorkerEntries[key].push(item);
+
+                    dailyHoursMap[key] = (dailyHoursMap[key] || 0) + item.Horas;
+
+                    // Verificar si el operario del parte está en la Plantilla de 24
+                    const isCensado = plantilla.some(p => normalizeStr(p) === normEmp);
+                    if (!isCensado) {
+                        if (!unlistedWorkersMap.has(item.Empleado)) {
+                            unlistedWorkersMap.set(item.Empleado, { nombre: item.Empleado, partes: 0, horas: 0 });
+                        }
+                        const info = unlistedWorkersMap.get(item.Empleado);
+                        info.partes += 1;
+                        info.horas += item.Horas;
+                    }
+
+                    // Incidencia: Obra no especificada
+                    if (item.Proyecto === "Obra no especificada") {
+                        incidencias.push({
+                            id: `sin_obra_${item.Fecha}_${item.Empleado}_${Math.random()}`,
+                            tipo: 'sin_obra',
+                            titulo: 'Obra no especificada',
+                            gravedad: 'media',
+                            fecha: item.Fecha,
+                            empleado: item.Empleado,
+                            descripcion: `Parte de trabajo registrado sin asociar obra o proyecto.`
+                        });
+                    }
+
+                    // Incidencia: Parte con 0 horas
+                    if (item.Horas <= 0) {
+                        incidencias.push({
+                            id: `horas_cero_${item.Fecha}_${item.Empleado}_${Math.random()}`,
+                            tipo: 'horas_cero',
+                            titulo: 'Parte con 0 horas',
+                            gravedad: 'baja',
+                            fecha: item.Fecha,
+                            empleado: item.Empleado,
+                            descripcion: `El registro de horas es 0 o negativo.`
+                        });
+                    }
+                });
+
+                // Incidencia: Exceso de horas en un solo día (>9h)
+                Object.entries(dailyHoursMap).forEach(([key, totalHrs]) => {
+                    if (totalHrs > 9) {
+                        const [fecha, normEmp] = key.split('|');
+                        const item = data.find(d => d.Fecha === fecha && normalizeStr(d.Empleado) === normEmp);
+                        incidencias.push({
+                            id: `exceso_${fecha}_${normEmp}`,
+                            tipo: 'exceso_horas',
+                            titulo: 'Exceso de Jornada (>9h)',
+                            gravedad: 'media',
+                            fecha: fecha,
+                            empleado: item ? item.Empleado : normEmp,
+                            descripcion: `Imputación de ${parseFloat(totalHrs.toFixed(2))}h en un único día.`
+                        });
+                    }
+                });
+
+                // COTEJO: Faltas de parte para los 24 trabajadores de plantilla en fechas de actividad
+                plantilla.forEach(nombreOficial => {
+                    const normOficial = normalizeStr(nombreOficial);
+                    uniqueDates.forEach(fecha => {
+                        const key = `${fecha}|${normOficial}`;
+                        if (!dateWorkerEntries[key] || dateWorkerEntries[key].length === 0) {
+                            incidencias.push({
+                                id: `ausencia_${fecha}_${normOficial}`,
+                                tipo: 'ausencia',
+                                titulo: 'Falta / Ausencia de Parte',
+                                gravedad: 'alta',
+                                fecha: fecha,
+                                empleado: nombreOficial,
+                                descripcion: `El trabajador no ha registrado ningún parte de trabajo en este día activo.`
+                            });
+                        }
+                    });
+                });
+
+                // Estadísticas detalladas por trabajador de la plantilla
+                const workerStats = {};
+                plantilla.forEach(nombreOficial => {
+                    const normOficial = normalizeStr(nombreOficial);
+                    let totalHoras = 0;
+                    let totalPartes = 0;
+                    let diasConParte = 0;
+
+                    uniqueDates.forEach(fecha => {
+                        const key = `${fecha}|${normOficial}`;
+                        if (dateWorkerEntries[key] && dateWorkerEntries[key].length > 0) {
+                            diasConParte++;
+                            dateWorkerEntries[key].forEach(e => {
+                                totalHoras += e.Horas;
+                                totalPartes++;
+                            });
+                        }
+                    });
+
+                    const misIncidencias = incidencias.filter(inc => normalizeStr(inc.empleado) === normOficial);
+                    const ausencias = misIncidencias.filter(inc => inc.tipo === 'ausencia').length;
+
+                    workerStats[nombreOficial] = {
+                        nombre: nombreOficial,
+                        totalHoras,
+                        totalPartes,
+                        diasConParte,
+                        diasEvaluados: uniqueDates.length,
+                        ausencias,
+                        numIncidencias: misIncidencias.length,
+                        incidencias: misIncidencias
+                    };
+                });
+
+                // Registrar operarios no censados como incidencia global
+                unlistedWorkersMap.forEach((val, key) => {
+                    incidencias.push({
+                        id: `no_censado_${key}`,
+                        tipo: 'no_censado',
+                        titulo: 'Operario No Censado',
+                        gravedad: 'alta',
+                        fecha: 'Múltiple',
+                        empleado: key,
+                        descripcion: `Consta en ${val.partes} partes (${parseFloat(val.horas.toFixed(1))}h) pero no está registrado en la plantilla oficial de 24 trabajadores.`
+                    });
+                });
+
+                return {
+                    incidencias,
+                    unlistedWorkers: Array.from(unlistedWorkersMap.values()),
+                    workerStats,
+                    totalIncidencias: incidencias.length
+                };
+            }, [data, plantilla, uniqueDates]);
+
+            if (!GOOGLE_SHEETS_CSV_URL) return null;
+
+            if (loading && data.length === 0) return (
+                <div className="min-h-screen flex flex-col items-center justify-center gap-4 text-gray-400">
+                    <RefreshCcw className="w-8 h-8 animate-spin text-blue-500" />
+                    <p>Sincronizando con Google Sheets y cotejando plantilla...</p>
+                </div>
+            );
+
+            if (error) return (
+                <div className="min-h-screen flex items-center justify-center p-6">
+                    <div className="bg-enue-card border border-red-500/20 p-6 rounded-xl max-w-lg text-center">
+                        <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+                        <h2 className="text-xl font-bold mb-2">Error de Sincronización</h2>
+                        <p className="text-gray-400 text-sm">{error}</p>
+                    </div>
+                </div>
+            );
+
+            const totalHoras = data.reduce((a, b) => a + b.Horas, 0);
+            const totalCosteGlobal = totalHoras * TARIFA_HORA;
+            const uniqueProjects = [...new Set(data.map(d => d.Proyecto))];
+            const activeProjectsCount = uniqueProjects.length;
+            const totalWorkersInPartes = [...new Set(data.map(d => d.Empleado))].length;
+            const totalEntries = data.length;
+
+            const projectAgg = {};
+            data.forEach(d => {
+                if (!projectAgg[d.Proyecto]) projectAgg[d.Proyecto] = { name: d.Proyecto, horas: 0, partes: 0, coste: 0 };
+                projectAgg[d.Proyecto].horas += d.Horas;
+                projectAgg[d.Proyecto].partes += 1;
+                projectAgg[d.Proyecto].coste += (d.Horas * TARIFA_HORA);
+            });
+            
+            const sortedProjects = Object.values(projectAgg).sort((a,b) => b.horas - a.horas);
+            const top10 = sortedProjects.slice(0,10).map((p, idx) => ({ ...p, fill: idx === 0 ? '#3b82f6' : '#1e40af' }));
+            const top4 = sortedProjects.slice(0,4);
+
+            const medals = [
+                { color: "text-yellow-400", label: "Oro" },
+                { color: "text-gray-300", label: "Plata" },
+                { color: "text-amber-600", label: "Bronce" },
+                { color: "text-blue-200", label: "Base" }
+            ];
+
+            const filteredProjectsList = sortedProjects.filter(p => p.name.toLowerCase().includes(searchTerm.toLowerCase()));
+
+            const handleProjectClick = (proj) => {
+                setSelectedProject(proj);
+                setWorkerFilter("");
+                setDateFilter("");
+            };
+
+            // Filtrado de incidencias
+            const filteredIncidencias = auditAnalysis.incidencias.filter(inc => {
+                if (incidenciaFilterType === "all") return true;
+                return inc.tipo === incidenciaFilterType;
+            });
+
+            return (
+                <div className="max-w-7xl mx-auto p-4 md:p-6 pb-20 relative">
+                    {/* CABECERA Y NAVEGACIÓN */}
+                    <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4 border-b border-white/10 pb-6 relative z-10">
+                        <div className="flex items-center gap-4">
+                            <div className="w-12 h-12 bg-white rounded-lg flex items-center justify-center text-[#09090b] font-black text-2xl shadow-md">
+                                E
+                            </div>
+                            <div>
+                                <h1 className="text-xl md:text-2xl font-bold tracking-tight">ENUE Proyectos y Construcción</h1>
+                                <p className="text-sm text-gray-400">Cuadro de Mandos y Control de Incidencias de Plantilla</p>
+                            </div>
+                        </div>
+
+                        {/* PESTAÑAS DE NAVEGACIÓN */}
+                        <div className="flex items-center gap-2 bg-white/5 p-1 rounded-xl border border-white/10">
+                            <button 
+                                onClick={() => { setActiveTab('dashboard'); setSelectedProject(null); }}
+                                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${activeTab === 'dashboard' ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+                            >
+                                <BarChart className="w-4 h-4" /> Dashboard Económico
+                            </button>
+                            <button 
+                                onClick={() => setActiveTab('incidencias')}
+                                className={`px-4 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-2 relative ${activeTab === 'incidencias' ? 'bg-amber-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+                            >
+                                <ShieldAlert className="w-4 h-4" /> Incidencias y Plantilla
+                                {auditAnalysis.totalIncidencias > 0 && (
+                                    <span className="ml-1 px-1.5 py-0.5 text-xs font-bold bg-red-500 text-white rounded-full">
+                                        {auditAnalysis.totalIncidencias}
+                                    </span>
+                                )}
+                            </button>
+                        </div>
+
+                        {/* BOTONES ACCIONADORES */}
+                        <div className="flex items-center gap-3">
+                            <button 
+                                onClick={openModalPlantilla}
+                                className="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-2 rounded-lg text-sm transition-colors text-gray-300"
+                                title="Configurar plantilla oficial de 24 trabajadores"
+                            >
+                                <Settings className="w-4 h-4 text-amber-400" />
+                                <span className="hidden sm:inline">Plantilla ({plantilla.length})</span>
+                            </button>
+
+                            <button 
+                                onClick={fetchData} 
+                                disabled={loading}
+                                className="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-2 rounded-lg text-sm transition-colors text-gray-300"
+                                title="Sincronizar con Google Sheets"
+                            >
+                                <RefreshCcw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* VISTA 1: DASHBOARD ECONÓMICO */}
+                    {activeTab === 'dashboard' && !selectedProject && (
+                        <div className="space-y-6 relative z-10">
+                            {/* RECUADROS KPI (INCLUYE MÉTRICA DE INCIDENCIAS) */}
+                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+                                <div className="bg-enue-card backdrop-blur-md border border-white/5 p-4 rounded-xl shadow-lg relative overflow-hidden group">
+                                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity"><Clock className="w-10 h-10 text-blue-500"/></div>
+                                    <p className="text-xs text-gray-400 mb-1">Total Horas</p>
+                                    <p className="text-xl xl:text-2xl font-bold text-blue-400">{parseFloat(totalHoras.toFixed(1))} <span className="text-xs font-normal">h</span></p>
+                                </div>
+
+                                <div className="bg-enue-card backdrop-blur-md border border-white/5 p-4 rounded-xl shadow-lg relative overflow-hidden group">
+                                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity"><Banknote className="w-10 h-10 text-emerald-500"/></div>
+                                    <p className="text-xs text-gray-400 mb-1">Coste Total</p>
+                                    <p className="text-xl xl:text-2xl font-bold text-emerald-400">{formatEur(totalCosteGlobal)}</p>
+                                </div>
+
+                                <div className="bg-enue-card backdrop-blur-md border border-white/5 p-4 rounded-xl shadow-lg relative overflow-hidden group">
+                                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity"><Building className="w-10 h-10 text-indigo-500"/></div>
+                                    <p className="text-xs text-gray-400 mb-1">Obras Activas</p>
+                                    <p className="text-xl xl:text-2xl font-bold text-indigo-400">{activeProjectsCount}</p>
+                                </div>
+
+                                <div className="bg-enue-card backdrop-blur-md border border-white/5 p-4 rounded-xl shadow-lg relative overflow-hidden group">
+                                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity"><Users className="w-10 h-10 text-teal-500"/></div>
+                                    <p className="text-xs text-gray-400 mb-1">Plantilla / Partes</p>
+                                    <p className="text-xl xl:text-2xl font-bold text-teal-400">{totalWorkersInPartes} <span className="text-xs text-gray-400 font-normal">/ {plantilla.length} reg</span></p>
+                                </div>
+
+                                <div className="bg-enue-card backdrop-blur-md border border-white/5 p-4 rounded-xl shadow-lg relative overflow-hidden group">
+                                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity"><FileText className="w-10 h-10 text-amber-500"/></div>
+                                    <p className="text-xs text-gray-400 mb-1">Partes Totales</p>
+                                    <p className="text-xl xl:text-2xl font-bold text-amber-400">{totalEntries}</p>
+                                </div>
+
+                                {/* MÉTRICA DE INCIDENCIAS COTEJADAS */}
+                                <div 
+                                    onClick={() => setActiveTab('incidencias')}
+                                    className="bg-enue-card backdrop-blur-md border border-amber-500/20 p-4 rounded-xl shadow-lg relative overflow-hidden cursor-pointer hover:border-amber-500/40 transition-all group"
+                                >
+                                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity"><AlertTriangle className="w-10 h-10 text-amber-500"/></div>
+                                    <p className="text-xs text-amber-400 font-medium mb-1 flex items-center gap-1">
+                                        Incidencias <AlertCircle className="w-3 h-3 text-amber-400" />
+                                    </p>
+                                    <p className="text-xl xl:text-2xl font-bold text-red-400">{auditAnalysis.totalIncidencias}</p>
+                                    <p className="text-[10px] text-gray-400 mt-1">Click para auditoría</p>
+                                </div>
+                            </div>
+
+                            {/* GRÁFICOS Y RANKING */}
+                            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                                <div className="lg:col-span-2 bg-enue-card backdrop-blur-md border border-white/5 p-4 md:p-6 rounded-xl shadow-lg">
+                                    <h3 className="text-lg font-semibold mb-6 flex items-center"><BarChart className="w-5 h-5 mr-2 text-gray-400"/> Top 10 Obras (Horas Imputadas)</h3>
+                                    <div className="h-[26rem] w-full">
+                                        <ResponsiveContainer width="100%" height="100%">
+                                            <BarChart data={top10} layout="vertical" margin={{ top: 5, right: 50, left: 10, bottom: 5 }}>
+                                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#ffffff10" />
+                                                <XAxis type="number" stroke="#888" tick={{fill: '#888', fontSize: 12}} />
+                                                <YAxis dataKey="name" type="category" width={140} tick={{fill: '#ccc', fontSize: 11}} />
+                                                <Tooltip 
+                                                    cursor={{fill: '#ffffff08'}}
+                                                    contentStyle={{backgroundColor: '#18181b', borderColor: '#ffffff10', color: '#fff', borderRadius: '12px'}}
+                                                    formatter={(value, name, props) => [`${value}h (${formatEur(props.payload.coste)})`, "Total Horas"]}
+                                                />
+                                                <Bar dataKey="horas" radius={[0, 4, 4, 0]}>
+                                                    {top10.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.fill} />)}
+                                                    <LabelList dataKey="horas" position="right" fill="#ffffff" fontSize={12} fontWeight="bold" formatter={(val) => `${parseFloat(val.toFixed(1))}h`} />
+                                                </Bar>
+                                            </BarChart>
+                                        </ResponsiveContainer>
+                                    </div>
+                                </div>
+
+                                <div className="bg-enue-card backdrop-blur-md border border-white/5 p-4 md:p-6 rounded-xl shadow-lg">
+                                    <h3 className="text-lg font-semibold mb-4 flex items-center"><Medal className="w-5 h-5 mr-2 text-yellow-500"/> Ranking Económico (Top 4)</h3>
+                                    <div className="space-y-4">
+                                        {top4.map((p, idx) => (
+                                            <div key={p.name} className="flex items-center p-3 rounded-xl bg-[#09090b] border border-white/5 hover:border-white/10 transition-all">
+                                                <div className="w-8 flex-shrink-0 flex justify-center">
+                                                    <Medal className={`w-6 h-6 ${medals[idx]?.color || 'text-gray-500'}`} />
+                                                </div>
+                                                <div className="ml-3 flex-1 min-w-0">
+                                                    <p className="text-sm font-medium truncate" title={p.name}>{p.name}</p>
+                                                    <div className="w-full bg-white/5 h-1.5 mt-2 rounded-full overflow-hidden">
+                                                        <div className="bg-emerald-500 h-full rounded-full" style={{width: `${Math.min(100, (p.coste/totalCosteGlobal)*100)}%`}}></div>
+                                                    </div>
+                                                </div>
+                                                <div className="ml-4 text-right">
+                                                    <p className="text-sm font-bold text-gray-200">{parseFloat(p.horas.toFixed(1))}h</p>
+                                                    <p className="text-sm font-bold text-emerald-400">{formatEur(p.coste)}</p>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* DIRECTORIO DE OBRAS */}
+                            <div className="bg-enue-card backdrop-blur-md border border-white/5 rounded-xl shadow-lg overflow-hidden flex flex-col">
+                                <div className="p-4 border-b border-white/5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-[#09090b]">
+                                    <h3 className="text-lg font-semibold flex items-center"><Building className="w-5 h-5 mr-2 text-gray-400"/> Directorio de Obras</h3>
+                                    <div className="relative w-full sm:w-64">
+                                        <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                                        <input 
+                                            type="text" 
+                                            placeholder="Buscar obra..." 
+                                            className="w-full bg-white/5 border border-white/10 rounded-full pl-9 pr-4 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 transition-all"
+                                            value={searchTerm}
+                                            onChange={(e) => setSearchTerm(e.target.value)}
+                                        />
+                                    </div>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left text-sm">
+                                        <thead className="bg-[#09090b] text-gray-400 border-b border-white/5">
+                                            <tr>
+                                                <th className="p-4 font-medium uppercase text-xs">Obra / Proyecto</th>
+                                                <th className="p-4 font-medium text-center uppercase text-xs">Partes</th>
+                                                <th className="p-4 font-medium text-center uppercase text-xs">Horas Imputadas</th>
+                                                <th className="p-4 font-medium text-center uppercase text-xs text-emerald-400/80">Coste Acumulado</th>
+                                                <th className="p-4 font-medium text-right uppercase text-xs">Acción</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {filteredProjectsList.map((p, i) => (
+                                                <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                                                    <td className="p-4">
+                                                        <div className="flex items-center">
+                                                            {p.name === "Obra no especificada" && <AlertCircle className="w-4 h-4 mr-2 text-red-500" />}
+                                                            <span className={`font-medium ${p.name === "Obra no especificada" ? "text-red-400" : "text-gray-200"}`}>{p.name}</span>
+                                                        </div>
+                                                    </td>
+                                                    <td className="p-4 text-center text-gray-400">{p.partes}</td>
+                                                    <td className="p-4 text-center font-bold text-gray-100">{parseFloat(p.horas.toFixed(2))}h</td>
+                                                    <td className="p-4 text-center font-bold text-emerald-400">{formatEur(p.coste)}</td>
+                                                    <td className="p-4 text-right">
+                                                        <button 
+                                                            onClick={() => handleProjectClick(p.name)}
+                                                            className="px-4 py-1.5 bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 border border-blue-500/20 rounded-lg text-xs font-semibold transition-all"
+                                                        >
+                                                            Ver Detalle
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* VISTA DETALLE PROYECTO SELECCIONADO */}
+                    {activeTab === 'dashboard' && selectedProject && (
+                        <div className="space-y-6 animate-in slide-in-from-right-4 duration-300 relative z-10">
+                            <button onClick={() => setSelectedProject(null)} className="flex items-center text-sm text-blue-400 hover:text-blue-300 mb-2 font-medium">
+                                <ChevronLeft className="w-4 h-4 mr-1" /> Volver al Dashboard
+                            </button>
+                            
+                            <h2 className="text-2xl font-bold border-b border-white/10 pb-4 flex items-center gap-2">
+                                {selectedProject === "Obra no especificada" ? <AlertCircle className="w-6 h-6 text-red-500" /> : <Building className="w-6 h-6 text-blue-500" />}
+                                {selectedProject}
+                            </h2>
+
+                            <div className="bg-enue-card border border-white/5 rounded-xl overflow-hidden shadow-lg backdrop-blur-md">
+                                <div className="p-4 border-b border-white/5 bg-white/5 flex justify-between items-center">
+                                    <h3 className="font-semibold flex items-center"><FileText className="w-4 h-4 mr-2" /> Partes Registrados</h3>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left text-sm">
+                                        <thead className="bg-[#09090b] text-gray-400">
+                                            <tr>
+                                                <th className="p-4 font-medium">Fecha</th>
+                                                <th className="p-4 font-medium">Trabajador</th>
+                                                <th className="p-4 font-medium text-center w-16">Hrs</th>
+                                                <th className="p-4 font-medium text-center w-24">Coste</th>
+                                                <th className="p-4 font-medium">Tarea</th>
+                                                <th className="p-4 font-medium">Observaciones</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {data.filter(d => d.Proyecto === selectedProject).map((d, i) => (
+                                                <tr key={i} className="border-t border-white/5 hover:bg-white/5 transition-colors">
+                                                    <td className="p-4">{d.Fecha}</td>
+                                                    <td className="p-4 font-medium text-gray-200">{d.Empleado}</td>
+                                                    <td className="p-4 text-center font-semibold text-blue-300">{d.Horas}</td>
+                                                    <td className="p-4 text-center text-emerald-400">{formatEur(d.Horas * TARIFA_HORA)}</td>
+                                                    <td className="p-4 text-gray-300">{d.Tarea}</td>
+                                                    <td className="p-4 text-gray-400 italic text-xs">{d.Obs || "-"}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* VISTA 2: AUDITORÍA DE INCIDENCIAS Y CONTROL DE PLANTILLA */}
+                    {activeTab === 'incidencias' && (
+                        <div className="space-y-6 relative z-10 animate-in fade-in duration-300">
+                            {/* BANNER INFORMATIVO COTEJO */}
+                            <div className="bg-gradient-to-r from-amber-500/10 via-enue-card to-blue-500/10 border border-amber-500/20 p-6 rounded-2xl shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                                <div className="flex items-start gap-4">
+                                    <div className="p-3 bg-amber-500/20 rounded-xl text-amber-400 mt-1 md:mt-0">
+                                        <ShieldAlert className="w-7 h-7" />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-xl font-bold">Cotejo de Plantilla y Auditoría de Partes</h2>
+                                        <p className="text-sm text-gray-300 mt-1">
+                                            Se evalúan los partes de trabajo frente a la plantilla oficial de <strong className="text-amber-400">{plantilla.length} trabajadores</strong> registrados en {uniqueDates.length} días de actividad.
+                                        </p>
+                                    </div>
+                                </div>
+                                <button 
+                                    onClick={openModalPlantilla}
+                                    className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-black font-semibold rounded-lg text-sm transition-all flex items-center gap-2 whitespace-nowrap shadow-md"
+                                >
+                                    <Edit3 className="w-4 h-4" /> Editar Plantilla (Excel)
+                                </button>
+                            </div>
+
+                            {/* TARJETAS RESUMEN DE INCIDENCIAS */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                                <div className="bg-enue-card border border-white/5 p-4 rounded-xl shadow-lg">
+                                    <p className="text-xs text-gray-400 mb-1 font-medium">Faltas / Ausencias de Parte</p>
+                                    <p className="text-3xl font-bold text-red-400">
+                                        {auditAnalysis.incidencias.filter(i => i.tipo === 'ausencia').length}
+                                    </p>
+                                    <p className="text-xs text-gray-500 mt-1">Días sin parte registrado por un operario</p>
+                                </div>
+
+                                <div className="bg-enue-card border border-white/5 p-4 rounded-xl shadow-lg">
+                                    <p className="text-xs text-gray-400 mb-1 font-medium">Operarios No Censados</p>
+                                    <p className="text-3xl font-bold text-amber-400">
+                                        {auditAnalysis.unlistedWorkers.length}
+                                    </p>
+                                    <p className="text-xs text-gray-500 mt-1">Nombres en partes fuera de la plantilla oficial</p>
+                                </div>
+
+                                <div className="bg-enue-card border border-white/5 p-4 rounded-xl shadow-lg">
+                                    <p className="text-xs text-gray-400 mb-1 font-medium">Exceso de Jornada (&gt;9h)</p>
+                                    <p className="text-3xl font-bold text-indigo-400">
+                                        {auditAnalysis.incidencias.filter(i => i.tipo === 'exceso_horas').length}
+                                    </p>
+                                    <p className="text-xs text-gray-500 mt-1">Jornadas con imputación de horas anómala</p>
+                                </div>
+
+                                <div className="bg-enue-card border border-white/5 p-4 rounded-xl shadow-lg">
+                                    <p className="text-xs text-gray-400 mb-1 font-medium">Obras Sin Especificar</p>
+                                    <p className="text-3xl font-bold text-purple-400">
+                                        {auditAnalysis.incidencias.filter(i => i.tipo === 'sin_obra').length}
+                                    </p>
+                                    <p className="text-xs text-gray-500 mt-1">Partes de trabajo sin proyecto asignado</p>
+                                </div>
+                            </div>
+
+                            {/* SECCIÓN 1: ESTADO INDIVIDUAL DE LOS 24 TRABAJADORES EN PLANTILLA */}
+                            <div className="bg-enue-card border border-white/5 rounded-xl shadow-lg overflow-hidden">
+                                <div className="p-4 border-b border-white/5 bg-[#09090b] flex justify-between items-center">
+                                    <h3 className="font-semibold text-gray-200 flex items-center gap-2">
+                                        <Users className="w-5 h-5 text-blue-400" /> Rendimiento y Control de los {plantilla.length} Trabajadores de Plantilla
+                                    </h3>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left text-sm">
+                                        <thead className="bg-[#09090b] text-gray-400 border-b border-white/5">
+                                            <tr>
+                                                <th className="p-4 font-medium uppercase text-xs">Nombre del Trabajador</th>
+                                                <th className="p-4 font-medium text-center uppercase text-xs">Días Asistidos</th>
+                                                <th className="p-4 font-medium text-center uppercase text-xs">Total Horas</th>
+                                                <th className="p-4 font-medium text-center uppercase text-xs">Faltas de Parte</th>
+                                                <th className="p-4 font-medium text-center uppercase text-xs">Estado Auditoría</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {plantilla.map((nombre, i) => {
+                                                const stats = auditAnalysis.workerStats[nombre] || { diasConParte: 0, totalHoras: 0, ausencias: 0, numIncidencias: 0 };
+                                                const hasErrors = stats.ausencias > 0 || stats.numIncidencias > 0;
+
+                                                return (
+                                                    <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                                                        <td className="p-4 font-semibold text-gray-200 flex items-center gap-2">
+                                                            <div className="w-7 h-7 rounded-full bg-white/10 flex items-center justify-center text-xs font-bold text-gray-300">
+                                                                {i + 1}
+                                                            </div>
+                                                            {nombre}
+                                                        </td>
+                                                        <td className="p-4 text-center font-medium">
+                                                            <span className="text-gray-200">{stats.diasConParte}</span>
+                                                            <span className="text-gray-500 text-xs"> / {uniqueDates.length} días</span>
+                                                        </td>
+                                                        <td className="p-4 text-center font-bold text-blue-400">
+                                                            {parseFloat(stats.totalHoras.toFixed(1))}h
+                                                        </td>
+                                                        <td className="p-4 text-center">
+                                                            {stats.ausencias > 0 ? (
+                                                                <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30">
+                                                                    {stats.ausencias} ausencias
+                                                                </span>
+                                                            ) : (
+                                                                <span className="text-gray-500 text-xs">0 faltas</span>
+                                                            )}
+                                                        </td>
+                                                        <td className="p-4 text-center">
+                                                            {!hasErrors ? (
+                                                                <span className="inline-flex items-center gap-1 text-xs text-green-400 bg-green-500/10 px-3 py-1 rounded-full border border-green-500/20 font-medium">
+                                                                    <CheckCircle2 className="w-3.5 h-3.5" /> Correcto
+                                                                </span>
+                                                            ) : (
+                                                                <span className="inline-flex items-center gap-1 text-xs text-amber-400 bg-amber-500/10 px-3 py-1 rounded-full border border-amber-500/20 font-medium">
+                                                                    <AlertTriangle className="w-3.5 h-3.5" /> {stats.numIncidencias} Alerta(s)
+                                                                </span>
+                                                            )}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            {/* SECCIÓN 2: BITÁCORA Y FILTRADO DETALLADO DE INCIDENCIAS */}
+                            <div className="bg-enue-card border border-white/5 rounded-xl shadow-lg overflow-hidden">
+                                <div className="p-4 border-b border-white/5 bg-[#09090b] flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                                    <h3 className="font-semibold text-gray-200 flex items-center gap-2">
+                                        <ShieldAlert className="w-5 h-5 text-amber-400" /> Bitácora Completa de Incidencias Detectadas ({filteredIncidencias.length})
+                                    </h3>
+
+                                    {/* FILTRO DE TIPOS DE INCIDENCIA */}
+                                    <div className="flex items-center gap-2 overflow-x-auto w-full md:w-auto pb-2 md:pb-0">
+                                        <button onClick={() => setIncidenciaFilterType("all")} className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${incidenciaFilterType === 'all' ? 'bg-white text-black font-bold' : 'bg-white/5 text-gray-400 hover:text-white'}`}>Todas</button>
+                                        <button onClick={() => setIncidenciaFilterType("ausencia")} className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${incidenciaFilterType === 'ausencia' ? 'bg-red-500 text-white' : 'bg-white/5 text-gray-400 hover:text-white'}`}>Faltas de Parte</button>
+                                        <button onClick={() => setIncidenciaFilterType("no_censado")} className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${incidenciaFilterType === 'no_censado' ? 'bg-amber-500 text-black font-bold' : 'bg-white/5 text-gray-400 hover:text-white'}`}>No Censados</button>
+                                        <button onClick={() => setIncidenciaFilterType("exceso_horas")} className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${incidenciaFilterType === 'exceso_horas' ? 'bg-indigo-500 text-white' : 'bg-white/5 text-gray-400 hover:text-white'}`}>Exceso Horas</button>
+                                        <button onClick={() => setIncidenciaFilterType("sin_obra")} className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${incidenciaFilterType === 'sin_obra' ? 'bg-purple-500 text-white' : 'bg-white/5 text-gray-400 hover:text-white'}`}>Sin Obra</button>
+                                    </div>
+                                </div>
+
+                                <div className="overflow-x-auto max-h-[30rem]">
+                                    <table className="w-full text-left text-sm relative">
+                                        <thead className="bg-[#09090b] text-gray-400 sticky top-0 z-10 border-b border-white/5">
+                                            <tr>
+                                                <th className="p-4 font-medium uppercase text-xs">Fecha</th>
+                                                <th className="p-4 font-medium uppercase text-xs">Trabajador Afetado</th>
+                                                <th className="p-4 font-medium uppercase text-xs">Tipo de Incidencia</th>
+                                                <th className="p-4 font-medium uppercase text-xs">Gravedad</th>
+                                                <th className="p-4 font-medium uppercase text-xs">Detalle / Observación</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {filteredIncidencias.map((inc) => (
+                                                <tr key={inc.id} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                                                    <td className="p-4 whitespace-nowrap text-gray-300 font-mono text-xs">{inc.fecha}</td>
+                                                    <td className="p-4 font-medium text-gray-100">{inc.empleado}</td>
+                                                    <td className="p-4">
+                                                        <span className={`px-2.5 py-1 rounded-md text-xs font-bold ${
+                                                            inc.tipo === 'ausencia' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
+                                                            inc.tipo === 'no_censado' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' :
+                                                            inc.tipo === 'exceso_horas' ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30' :
+                                                            'bg-purple-500/20 text-purple-400 border border-purple-500/30'
+                                                        }`}>
+                                                            {inc.titulo}
+                                                        </span>
+                                                    </td>
+                                                    <td className="p-4">
+                                                        {inc.gravedad === 'alta' && <span className="text-red-400 font-semibold text-xs flex items-center gap-1"><AlertTriangle className="w-3.5 h-3.5"/> Alta</span>}
+                                                        {inc.gravedad === 'media' && <span className="text-amber-400 font-semibold text-xs flex items-center gap-1"><AlertCircle className="w-3.5 h-3.5"/> Media</span>}
+                                                        {inc.gravedad === 'baja' && <span className="text-gray-400 font-semibold text-xs">Baja</span>}
+                                                    </td>
+                                                    <td className="p-4 text-gray-400 text-xs leading-relaxed">{inc.descripcion}</td>
+                                                </tr>
+                                            ))}
+                                            {filteredIncidencias.length === 0 && (
+                                                <tr>
+                                                    <td colSpan="5" className="p-8 text-center text-gray-500">No se encontraron incidencias para este filtro.</td>
+                                                </tr>
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MODAL CONFIGURADOR DE LA PLANTILLA OFICIAL (24 TRABAJADORES) */}
+                    {showPlantillaModal && (
+                        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                            <div className="bg-[#18181b] border border-white/10 rounded-2xl max-w-xl w-full p-6 shadow-2xl space-y-4 animate-in zoom-in-95 duration-200">
+                                <div className="flex justify-between items-center border-b border-white/10 pb-4">
+                                    <h3 className="text-lg font-bold flex items-center gap-2">
+                                        <Settings className="w-5 h-5 text-amber-400" /> Configurar Plantilla (Excel)
+                                    </h3>
+                                    <button onClick={() => setShowPlantillaModal(false)} className="text-gray-400 hover:text-white">
+                                        <X className="w-5 h-5" />
+                                    </button>
+                                </div>
+                                <p className="text-xs text-gray-300">
+                                    Pega la lista con los <strong>24 nombres de tus trabajadores</strong> copiada directamente desde tu Excel (un nombre por cada línea):
+                                </p>
+                                <textarea 
+                                    rows="12" 
+                                    className="w-full bg-[#09090b] border border-white/10 rounded-xl p-3 text-sm font-mono focus:outline-none focus:border-amber-500 text-gray-200 leading-relaxed"
+                                    placeholder="Juan Pérez&#10;Carlos Gómez&#10;..."
+                                    value={plantillaInput}
+                                    onChange={(e) => setPlantillaInput(e.target.value)}
+                                ></textarea>
+                                <div className="flex justify-between items-center pt-2">
+                                    <span className="text-xs text-gray-400 font-medium">
+                                        Líneas detectadas: <strong className="text-amber-400">{plantillaInput.split('\n').filter(n => n.trim() !== '').length}</strong>
+                                    </span>
+                                    <div className="flex gap-2">
+                                        <button 
+                                            onClick={() => handleSavePlantilla(DEFAULT_PLANTILLA_24)}
+                                            className="px-3 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs text-gray-300 transition-colors"
+                                        >
+                                            Restablecer Ejemplo
+                                        </button>
+                                        <button 
+                                            onClick={() => {
+                                                const list = plantillaInput.split('\n').map(n => n.trim()).filter(n => n !== '');
+                                                handleSavePlantilla(list);
+                                            }}
+                                            className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-black font-bold rounded-lg text-xs transition-colors shadow-md flex items-center gap-1"
+                                        >
+                                            <Check className="w-4 h-4" /> Guardar Plantilla
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
